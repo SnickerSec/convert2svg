@@ -1,0 +1,12 @@
+# Folders
+uploads/
+outputs/
+__pycache__/
+*.pyc
+
+# Test files
+*.svg
+
+# Environment
+.env
+venv/
