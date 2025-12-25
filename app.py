@@ -7,9 +7,12 @@ Features: batch conversion, live preview, preset profiles.
 import os
 import uuid
 import base64
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_file, render_template_string
 from werkzeug.utils import secure_filename
+import requests
 import vtracer
 
 app = Flask(__name__)
@@ -260,6 +263,96 @@ def preview():
         return jsonify({'error': str(e), 'success': False}), 500
 
 
+@app.route('/api/convert-url', methods=['POST'])
+def convert_url():
+    """Convert an image from a URL to SVG."""
+    data = request.get_json()
+    if not data or 'url' not in data:
+        return jsonify({'error': 'No URL provided'}), 400
+
+    url = data['url'].strip()
+
+    # Validate URL
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return jsonify({'error': 'Invalid URL format'}), 400
+    except Exception:
+        return jsonify({'error': 'Invalid URL'}), 400
+
+    # Get settings
+    preset = data.get('preset', 'default')
+    settings = PRESETS.get(preset, PRESETS['default']).copy()
+
+    for key in settings.keys():
+        if key in data:
+            settings[key] = data[key]
+
+    # Extract filename from URL
+    url_path = parsed.path
+    filename = os.path.basename(url_path) or 'image'
+    # Ensure it has an extension
+    if '.' not in filename:
+        filename += '.jpg'
+
+    # Clean filename
+    filename = re.sub(r'[^\w\-_\.]', '_', filename)
+
+    unique_id = str(uuid.uuid4())[:8]
+    input_path = app.config['UPLOAD_FOLDER'] / f"{unique_id}_{filename}"
+    output_filename = f"{unique_id}_{Path(filename).stem}.svg"
+    output_path = app.config['OUTPUT_FOLDER'] / output_filename
+
+    try:
+        # Download the image
+        response = requests.get(url, timeout=30, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        response.raise_for_status()
+
+        # Check content type
+        content_type = response.headers.get('content-type', '')
+        if not content_type.startswith('image/'):
+            return jsonify({'error': f'URL does not point to an image (got {content_type})'}), 400
+
+        # Save the image
+        with open(input_path, 'wb') as f:
+            f.write(response.content)
+
+        # Convert to SVG
+        convert_image(input_path, output_path, settings)
+
+        # Read SVG content
+        with open(output_path, 'r') as f:
+            svg_content = f.read()
+
+        input_size = os.path.getsize(input_path)
+        output_size = os.path.getsize(output_path)
+
+        # Clean up input file
+        os.remove(input_path)
+
+        return jsonify({
+            'success': True,
+            'original_name': filename,
+            'svg_filename': output_filename,
+            'svg_content': svg_content,
+            'input_size': input_size,
+            'output_size': output_size,
+        })
+
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Request timed out'}), 504
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Failed to download image: {str(e)}'}), 400
+    except Exception as e:
+        if input_path.exists():
+            os.remove(input_path)
+        if output_path.exists():
+            os.remove(output_path)
+        return jsonify({'error': str(e), 'success': False}), 500
+
+
 HTML_TEMPLATE = r'''
 <!DOCTYPE html>
 <html lang="en">
@@ -357,6 +450,78 @@ HTML_TEMPLATE = r'''
 
         .file-input {
             display: none;
+        }
+
+        .url-section {
+            margin-top: 20px;
+        }
+
+        .divider {
+            display: flex;
+            align-items: center;
+            text-align: center;
+            margin: 15px 0;
+            color: #666;
+        }
+
+        .divider::before,
+        .divider::after {
+            content: '';
+            flex: 1;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .divider span {
+            padding: 0 15px;
+            font-size: 0.85rem;
+        }
+
+        .url-input-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .url-input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.05);
+            color: #fff;
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+
+        .url-input:focus {
+            outline: none;
+            border-color: #3a7bd5;
+        }
+
+        .url-input::placeholder {
+            color: #666;
+        }
+
+        .url-convert-btn {
+            padding: 12px 20px;
+            background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            white-space: nowrap;
+        }
+
+        .url-convert-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(58, 123, 213, 0.3);
+        }
+
+        .url-convert-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
         }
 
         .settings-panel {
@@ -670,6 +835,14 @@ HTML_TEMPLATE = r'''
                 </div>
                 <input type="file" id="fileInput" class="file-input" multiple accept=".png,.jpg,.jpeg,.bmp,.gif,.webp,.tiff">
 
+                <div class="url-section">
+                    <div class="divider"><span>OR</span></div>
+                    <div class="url-input-group">
+                        <input type="text" id="urlInput" class="url-input" placeholder="Paste image URL here...">
+                        <button id="urlConvertBtn" class="url-convert-btn">Convert URL</button>
+                    </div>
+                </div>
+
                 <div class="file-list" id="fileList"></div>
 
                 <div class="loading" id="loading">
@@ -766,6 +939,8 @@ HTML_TEMPLATE = r'''
         const advancedToggle = document.getElementById('advancedToggle');
         const advancedSettings = document.getElementById('advancedSettings');
         const downloadAllBtn = document.getElementById('downloadAllBtn');
+        const urlInput = document.getElementById('urlInput');
+        const urlConvertBtn = document.getElementById('urlConvertBtn');
 
         let selectedFiles = [];
         let currentPreset = 'default';
@@ -957,6 +1132,59 @@ HTML_TEMPLATE = r'''
                 downloadSvg(file.svg_filename);
             });
         });
+
+        // URL conversion
+        urlConvertBtn.addEventListener('click', convertFromUrl);
+        urlInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') convertFromUrl();
+        });
+
+        async function convertFromUrl() {
+            const url = urlInput.value.trim();
+            if (!url) {
+                alert('Please enter an image URL');
+                return;
+            }
+
+            loading.classList.add('active');
+            urlConvertBtn.disabled = true;
+            resultsSection.style.display = 'none';
+
+            const settings = {
+                url: url,
+                preset: currentPreset,
+                colormode: document.getElementById('colormode').value,
+                mode: document.getElementById('mode').value,
+                filter_speckle: document.getElementById('filter_speckle').value,
+                color_precision: document.getElementById('color_precision').value,
+                layer_difference: document.getElementById('layer_difference').value,
+                corner_threshold: document.getElementById('corner_threshold').value,
+                length_threshold: document.getElementById('length_threshold').value,
+                path_precision: document.getElementById('path_precision').value,
+            };
+
+            try {
+                const response = await fetch('/api/convert-url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    displayResults([data]);
+                    urlInput.value = '';
+                } else {
+                    alert('Conversion failed: ' + data.error);
+                }
+            } catch (error) {
+                alert('Conversion failed: ' + error.message);
+            } finally {
+                loading.classList.remove('active');
+                urlConvertBtn.disabled = false;
+            }
+        }
     </script>
 </body>
 </html>
