@@ -8,12 +8,14 @@ import os
 import uuid
 import base64
 import re
+from io import StringIO
 from pathlib import Path
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify, send_file, render_template_string
 from werkzeug.utils import secure_filename
 import requests
 import vtracer
+import scour.scour
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max
@@ -133,6 +135,25 @@ def convert_image(input_path, output_path, settings):
     return output_path
 
 
+def optimize_svg(svg_content):
+    """Optimize SVG content using scour."""
+    options = scour.scour.parse_args([
+        '--enable-viewboxing',
+        '--enable-id-stripping',
+        '--enable-comment-stripping',
+        '--shorten-ids',
+        '--indent=none',
+    ])
+    options.infilename = None
+    options.outfilename = None
+
+    input_stream = StringIO(svg_content)
+    output_stream = StringIO()
+
+    scour.scour.start(options, input_stream, output_stream)
+    return output_stream.getvalue()
+
+
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
@@ -162,6 +183,9 @@ def convert():
         if key in request.form:
             settings[key] = request.form[key]
 
+    # Check if optimization is requested
+    should_optimize = request.form.get('optimize', 'false').lower() == 'true'
+
     results = []
     for file in files:
         if file and file.filename and allowed_file(file.filename):
@@ -175,11 +199,29 @@ def convert():
 
             try:
                 file.save(input_path)
+
+                # Read original image as base64 for comparison
+                with open(input_path, 'rb') as f:
+                    original_data = base64.b64encode(f.read()).decode('utf-8')
+
+                # Determine mime type
+                ext = Path(filename).suffix.lower()
+                mime_types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                              '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp'}
+                mime_type = mime_types.get(ext, 'image/png')
+                original_base64 = f"data:{mime_type};base64,{original_data}"
+
                 convert_image(input_path, output_path, settings)
 
                 # Read SVG content for preview
                 with open(output_path, 'r') as f:
                     svg_content = f.read()
+
+                # Optimize SVG if requested
+                if should_optimize:
+                    svg_content = optimize_svg(svg_content)
+                    with open(output_path, 'w') as f:
+                        f.write(svg_content)
 
                 # Get file sizes
                 input_size = os.path.getsize(input_path)
@@ -189,6 +231,7 @@ def convert():
                     'original_name': filename,
                     'svg_filename': output_filename,
                     'svg_content': svg_content,
+                    'original_image': original_base64,
                     'input_size': input_size,
                     'output_size': output_size,
                     'success': True,
@@ -288,6 +331,9 @@ def convert_url():
         if key in data:
             settings[key] = data[key]
 
+    # Check if optimization is requested
+    should_optimize = str(data.get('optimize', 'false')).lower() == 'true'
+
     # Extract filename from URL
     url_path = parsed.path
     filename = os.path.basename(url_path) or 'image'
@@ -326,6 +372,12 @@ def convert_url():
         with open(output_path, 'r') as f:
             svg_content = f.read()
 
+        # Optimize SVG if requested
+        if should_optimize:
+            svg_content = optimize_svg(svg_content)
+            with open(output_path, 'w') as f:
+                f.write(svg_content)
+
         input_size = os.path.getsize(input_path)
         output_size = os.path.getsize(output_path)
 
@@ -337,6 +389,7 @@ def convert_url():
             'original_name': filename,
             'svg_filename': output_filename,
             'svg_content': svg_content,
+            'original_image': url,
             'input_size': input_size,
             'output_size': output_size,
         })
@@ -385,6 +438,37 @@ HTML_TEMPLATE = r'''
             padding: 40px 0;
         }
 
+        .header-content {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+
+        .theme-toggle {
+            position: absolute;
+            right: 0;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 50%;
+            width: 44px;
+            height: 44px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+
+        .theme-toggle:hover {
+            background: rgba(255, 255, 255, 0.2);
+            transform: scale(1.1);
+        }
+
+        .theme-icon {
+            font-size: 1.3rem;
+        }
+
         h1 {
             font-size: 2.5rem;
             margin-bottom: 10px;
@@ -399,6 +483,92 @@ HTML_TEMPLATE = r'''
             font-size: 1.1rem;
         }
 
+        /* Light theme */
+        body.light-theme {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            color: #333;
+        }
+
+        body.light-theme .theme-toggle {
+            background: rgba(0, 0, 0, 0.1);
+            border-color: rgba(0, 0, 0, 0.2);
+        }
+
+        body.light-theme .upload-section,
+        body.light-theme .settings-panel,
+        body.light-theme .result-card {
+            background: rgba(255, 255, 255, 0.8);
+            border-color: rgba(0, 0, 0, 0.1);
+        }
+
+        body.light-theme .drop-zone {
+            border-color: rgba(0, 0, 0, 0.2);
+            background: rgba(0, 0, 0, 0.02);
+        }
+
+        body.light-theme .drop-zone:hover {
+            border-color: #3a7bd5;
+            background: rgba(58, 123, 213, 0.05);
+        }
+
+        body.light-theme .drop-zone-hint,
+        body.light-theme .subtitle {
+            color: #666;
+        }
+
+        body.light-theme .setting-input,
+        body.light-theme .url-input {
+            background: rgba(0, 0, 0, 0.05);
+            border-color: rgba(0, 0, 0, 0.2);
+            color: #333;
+        }
+
+        body.light-theme select.setting-input {
+            background: #fff;
+        }
+
+        body.light-theme select.setting-input option {
+            background: #fff;
+            color: #333;
+        }
+
+        body.light-theme .preset-btn {
+            background: rgba(0, 0, 0, 0.05);
+            border-color: rgba(0, 0, 0, 0.2);
+            color: #333;
+        }
+
+        body.light-theme .preset-btn:hover {
+            background: rgba(58, 123, 213, 0.1);
+        }
+
+        body.light-theme .result-btn {
+            background: rgba(0, 0, 0, 0.05);
+            border-color: rgba(0, 0, 0, 0.2);
+            color: #333;
+        }
+
+        body.light-theme .result-btn:hover {
+            background: rgba(58, 123, 213, 0.1);
+        }
+
+        body.light-theme .divider::before,
+        body.light-theme .divider::after {
+            border-color: rgba(0, 0, 0, 0.1);
+        }
+
+        body.light-theme .file-item {
+            background: rgba(0, 0, 0, 0.05);
+        }
+
+        body.light-theme .checkbox-label {
+            color: #333;
+        }
+
+        body.light-theme .setting-label {
+            color: #555;
+        }
+
         .main-content {
             display: grid;
             grid-template-columns: 1fr 300px;
@@ -408,6 +578,77 @@ HTML_TEMPLATE = r'''
         @media (max-width: 900px) {
             .main-content {
                 grid-template-columns: 1fr;
+            }
+
+            .settings-panel {
+                order: -1;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 10px;
+            }
+
+            header {
+                padding: 20px 0;
+            }
+
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .subtitle {
+                font-size: 0.95rem;
+            }
+
+            .upload-section {
+                padding: 15px;
+            }
+
+            .drop-zone {
+                padding: 30px 15px;
+            }
+
+            .drop-zone-icon {
+                font-size: 36px;
+            }
+
+            .drop-zone-text {
+                font-size: 1rem;
+            }
+
+            .url-input-group {
+                flex-direction: column;
+            }
+
+            .url-convert-btn {
+                width: 100%;
+            }
+
+            .preset-buttons {
+                grid-template-columns: repeat(3, 1fr);
+            }
+
+            .result-actions {
+                flex-direction: column;
+            }
+
+            .result-btn {
+                width: 100%;
+            }
+
+            .comparison-container {
+                height: 200px;
+            }
+
+            .results-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .theme-toggle {
+                width: 38px;
+                height: 38px;
             }
         }
 
@@ -522,6 +763,26 @@ HTML_TEMPLATE = r'''
             opacity: 0.5;
             cursor: not-allowed;
             transform: none;
+        }
+
+        .checkbox-group {
+            margin-top: 15px;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            font-size: 0.9rem;
+            color: #ccc;
+            gap: 10px;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: #3a7bd5;
+            cursor: pointer;
         }
 
         .settings-panel {
@@ -678,6 +939,98 @@ HTML_TEMPLATE = r'''
             height: auto;
         }
 
+        .comparison-container {
+            position: relative;
+            width: 100%;
+            height: 250px;
+            overflow: hidden;
+            background: #fff;
+        }
+
+        .comparison-original,
+        .comparison-svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+
+        .comparison-original img,
+        .comparison-svg svg {
+            max-width: 100%;
+            max-height: 230px;
+            object-fit: contain;
+        }
+
+        .comparison-original {
+            clip-path: inset(0 50% 0 0);
+        }
+
+        .comparison-slider {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: #3a7bd5;
+            left: 50%;
+            transform: translateX(-50%);
+            cursor: ew-resize;
+            z-index: 10;
+        }
+
+        .comparison-slider::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 40px;
+            height: 40px;
+            background: #3a7bd5;
+            border-radius: 50%;
+            border: 3px solid #fff;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        }
+
+        .comparison-slider::after {
+            content: '◀ ▶';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #fff;
+            font-size: 10px;
+            letter-spacing: -2px;
+            white-space: nowrap;
+        }
+
+        .comparison-labels {
+            position: absolute;
+            bottom: 8px;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: space-between;
+            padding: 0 10px;
+            font-size: 11px;
+            font-weight: 600;
+            pointer-events: none;
+            z-index: 5;
+        }
+
+        .comparison-labels span {
+            background: rgba(0,0,0,0.6);
+            color: #fff;
+            padding: 3px 8px;
+            border-radius: 4px;
+        }
+
         .result-info {
             padding: 15px;
         }
@@ -822,8 +1175,15 @@ HTML_TEMPLATE = r'''
 <body>
     <div class="container">
         <header>
-            <h1>Image to SVG Converter</h1>
-            <p class="subtitle">Convert raster images to scalable vector graphics</p>
+            <div class="header-content">
+                <div>
+                    <h1>Image to SVG Converter</h1>
+                    <p class="subtitle">Convert raster images to scalable vector graphics</p>
+                </div>
+                <button class="theme-toggle" id="themeToggle" title="Toggle theme">
+                    <span class="theme-icon">🌙</span>
+                </button>
+            </div>
         </header>
 
         <div class="main-content">
@@ -922,6 +1282,14 @@ HTML_TEMPLATE = r'''
                     </div>
                 </div>
 
+                <div class="setting-group checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="optimize" checked>
+                        <span class="checkmark"></span>
+                        Optimize SVG (reduce file size)
+                    </label>
+                </div>
+
                 <button class="convert-btn" id="convertBtn" disabled>Convert to SVG</button>
             </div>
         </div>
@@ -941,11 +1309,27 @@ HTML_TEMPLATE = r'''
         const downloadAllBtn = document.getElementById('downloadAllBtn');
         const urlInput = document.getElementById('urlInput');
         const urlConvertBtn = document.getElementById('urlConvertBtn');
+        const themeToggle = document.getElementById('themeToggle');
+        const themeIcon = themeToggle.querySelector('.theme-icon');
 
         let selectedFiles = [];
         let currentPreset = 'default';
         let presets = {};
         let convertedFiles = [];
+
+        // Theme toggle
+        const savedTheme = localStorage.getItem('theme') || 'dark';
+        if (savedTheme === 'light') {
+            document.body.classList.add('light-theme');
+            themeIcon.textContent = '☀️';
+        }
+
+        themeToggle.addEventListener('click', () => {
+            document.body.classList.toggle('light-theme');
+            const isLight = document.body.classList.contains('light-theme');
+            themeIcon.textContent = isLight ? '☀️' : '🌙';
+            localStorage.setItem('theme', isLight ? 'light' : 'dark');
+        });
 
         // Fetch presets
         fetch('/api/presets')
@@ -1056,6 +1440,7 @@ HTML_TEMPLATE = r'''
             formData.append('corner_threshold', document.getElementById('corner_threshold').value);
             formData.append('length_threshold', document.getElementById('length_threshold').value);
             formData.append('path_precision', document.getElementById('path_precision').value);
+            formData.append('optimize', document.getElementById('optimize').checked);
 
             try {
                 const response = await fetch('/api/convert', {
@@ -1075,12 +1460,22 @@ HTML_TEMPLATE = r'''
 
         function displayResults(results) {
             convertedFiles = results.filter(r => r.success);
-            resultsGrid.innerHTML = results.map(result => {
+            resultsGrid.innerHTML = results.map((result, index) => {
                 if (result.success) {
                     const reduction = ((1 - result.output_size / result.input_size) * 100).toFixed(1);
                     return `
                         <div class="result-card">
-                            <div class="result-preview">${result.svg_content}</div>
+                            <div class="comparison-container" data-index="${index}">
+                                <div class="comparison-svg">${result.svg_content}</div>
+                                <div class="comparison-original">
+                                    <img src="${result.original_image}" alt="Original">
+                                </div>
+                                <div class="comparison-slider"></div>
+                                <div class="comparison-labels">
+                                    <span>Original</span>
+                                    <span>SVG</span>
+                                </div>
+                            </div>
                             <div class="result-info">
                                 <div class="result-filename">${result.original_name}</div>
                                 <div class="result-stats">
@@ -1088,8 +1483,9 @@ HTML_TEMPLATE = r'''
                                     (${reduction > 0 ? '-' : '+'}${Math.abs(reduction)}%)
                                 </div>
                                 <div class="result-actions">
-                                    <button class="result-btn primary" onclick="downloadSvg('${result.svg_filename}')">Download</button>
-                                    <button class="result-btn" onclick="copySvg(\`${encodeURIComponent(result.svg_content)}\`)">Copy SVG</button>
+                                    <button class="result-btn primary" onclick="downloadSvg('${result.svg_filename}')">SVG</button>
+                                    <button class="result-btn" onclick="downloadPng(\`${encodeURIComponent(result.svg_content)}\`, '${result.svg_filename}')">PNG</button>
+                                    <button class="result-btn" onclick="copySvg(\`${encodeURIComponent(result.svg_content)}\`)">Copy</button>
                                 </div>
                             </div>
                         </div>
@@ -1108,6 +1504,7 @@ HTML_TEMPLATE = r'''
 
             resultsSection.style.display = 'block';
             downloadAllBtn.classList.toggle('show', convertedFiles.length > 1);
+            initComparisonSliders();
         }
 
         function formatBytes(bytes) {
@@ -1124,6 +1521,82 @@ HTML_TEMPLATE = r'''
             const content = decodeURIComponent(encodedContent);
             navigator.clipboard.writeText(content).then(() => {
                 alert('SVG copied to clipboard!');
+            });
+        }
+
+        function downloadPng(svgContent, filename) {
+            const svg = new Blob([decodeURIComponent(svgContent)], {type: 'image/svg+xml'});
+            const url = URL.createObjectURL(svg);
+            const img = new Image();
+
+            img.onload = function() {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.width || 800;
+                canvas.height = img.height || 600;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.drawImage(img, 0, 0);
+
+                canvas.toBlob(function(blob) {
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = filename.replace('.svg', '.png');
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                }, 'image/png');
+
+                URL.revokeObjectURL(url);
+            };
+
+            img.src = url;
+        }
+
+        function initComparisonSliders() {
+            document.querySelectorAll('.comparison-container').forEach(container => {
+                const slider = container.querySelector('.comparison-slider');
+                const original = container.querySelector('.comparison-original');
+                let isDragging = false;
+
+                function updateSlider(x) {
+                    const rect = container.getBoundingClientRect();
+                    let percent = ((x - rect.left) / rect.width) * 100;
+                    percent = Math.max(0, Math.min(100, percent));
+                    slider.style.left = percent + '%';
+                    original.style.clipPath = `inset(0 ${100 - percent}% 0 0)`;
+                }
+
+                slider.addEventListener('mousedown', (e) => {
+                    isDragging = true;
+                    e.preventDefault();
+                });
+
+                document.addEventListener('mousemove', (e) => {
+                    if (isDragging) updateSlider(e.clientX);
+                });
+
+                document.addEventListener('mouseup', () => {
+                    isDragging = false;
+                });
+
+                // Touch support
+                slider.addEventListener('touchstart', (e) => {
+                    isDragging = true;
+                    e.preventDefault();
+                });
+
+                document.addEventListener('touchmove', (e) => {
+                    if (isDragging) updateSlider(e.touches[0].clientX);
+                });
+
+                document.addEventListener('touchend', () => {
+                    isDragging = false;
+                });
+
+                // Click to move slider
+                container.addEventListener('click', (e) => {
+                    if (e.target !== slider) updateSlider(e.clientX);
+                });
             });
         }
 
@@ -1161,6 +1634,7 @@ HTML_TEMPLATE = r'''
                 corner_threshold: document.getElementById('corner_threshold').value,
                 length_threshold: document.getElementById('length_threshold').value,
                 path_precision: document.getElementById('path_precision').value,
+                optimize: document.getElementById('optimize').checked,
             };
 
             try {
