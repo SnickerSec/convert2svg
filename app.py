@@ -137,21 +137,30 @@ def convert_image(input_path, output_path, settings):
 
 def optimize_svg(svg_content):
     """Optimize SVG content using scour."""
-    options = scour.scour.parse_args([
-        '--enable-viewboxing',
-        '--enable-id-stripping',
-        '--enable-comment-stripping',
-        '--shorten-ids',
-        '--indent=none',
-    ])
-    options.infilename = None
-    options.outfilename = None
+    try:
+        # Ensure we have a string
+        if isinstance(svg_content, bytes):
+            svg_content = svg_content.decode('utf-8')
 
-    input_stream = StringIO(svg_content)
-    output_stream = StringIO()
+        options = scour.scour.parse_args([
+            '--enable-viewboxing',
+            '--enable-id-stripping',
+            '--enable-comment-stripping',
+            '--shorten-ids',
+            '--indent=none',
+        ])
+        options.infilename = None
+        options.outfilename = None
 
-    scour.scour.start(options, input_stream, output_stream)
-    return output_stream.getvalue()
+        input_stream = StringIO(svg_content)
+        output_stream = StringIO()
+
+        scour.scour.start(options, input_stream, output_stream)
+        return output_stream.getvalue()
+    except Exception as e:
+        # If optimization fails, return original content
+        print(f"SVG optimization failed: {e}")
+        return svg_content
 
 
 @app.route('/')
@@ -214,13 +223,13 @@ def convert():
                 convert_image(input_path, output_path, settings)
 
                 # Read SVG content for preview
-                with open(output_path, 'r') as f:
+                with open(output_path, 'r', encoding='utf-8') as f:
                     svg_content = f.read()
 
                 # Optimize SVG if requested
                 if should_optimize:
                     svg_content = optimize_svg(svg_content)
-                    with open(output_path, 'w') as f:
+                    with open(output_path, 'w', encoding='utf-8') as f:
                         f.write(svg_content)
 
                 # Get file sizes
@@ -289,7 +298,7 @@ def preview():
         file.save(input_path)
         convert_image(input_path, output_path, settings)
 
-        with open(output_path, 'r') as f:
+        with open(output_path, 'r', encoding='utf-8') as f:
             svg_content = f.read()
 
         # Clean up
@@ -369,13 +378,13 @@ def convert_url():
         convert_image(input_path, output_path, settings)
 
         # Read SVG content
-        with open(output_path, 'r') as f:
+        with open(output_path, 'r', encoding='utf-8') as f:
             svg_content = f.read()
 
         # Optimize SVG if requested
         if should_optimize:
             svg_content = optimize_svg(svg_content)
-            with open(output_path, 'w') as f:
+            with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(svg_content)
 
         input_size = os.path.getsize(input_path)
