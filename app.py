@@ -135,6 +135,28 @@ def convert_image(input_path, output_path, settings):
     return output_path
 
 
+def add_viewbox(svg_content):
+    """Add viewBox to SVG if missing, to enable proper scaling."""
+    if 'viewBox' in svg_content:
+        return svg_content
+
+    # Extract width and height
+    width_match = re.search(r'width="(\d+)"', svg_content)
+    height_match = re.search(r'height="(\d+)"', svg_content)
+
+    if width_match and height_match:
+        width = width_match.group(1)
+        height = height_match.group(1)
+        # Add viewBox after the opening svg tag
+        svg_content = re.sub(
+            r'(<svg[^>]*)(>)',
+            rf'\1 viewBox="0 0 {width} {height}"\2',
+            svg_content,
+            count=1
+        )
+    return svg_content
+
+
 def optimize_svg(svg_content):
     """Optimize SVG content using scour."""
     try:
@@ -226,11 +248,16 @@ def convert():
                 with open(output_path, 'r', encoding='utf-8') as f:
                     svg_content = f.read()
 
+                # Add viewBox for proper scaling
+                svg_content = add_viewbox(svg_content)
+
                 # Optimize SVG if requested
                 if should_optimize:
                     svg_content = optimize_svg(svg_content)
-                    with open(output_path, 'w', encoding='utf-8') as f:
-                        f.write(svg_content)
+
+                # Save updated SVG
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(svg_content)
 
                 # Get file sizes
                 input_size = os.path.getsize(input_path)
@@ -317,20 +344,12 @@ def preview():
 
 @app.route('/api/convert-url', methods=['POST'])
 def convert_url():
-    """Convert an image from a URL to SVG."""
+    """Convert an image from a URL or data URI to SVG."""
     data = request.get_json()
     if not data or 'url' not in data:
         return jsonify({'error': 'No URL provided'}), 400
 
     url = data['url'].strip()
-
-    # Validate URL
-    try:
-        parsed = urlparse(url)
-        if not parsed.scheme or not parsed.netloc:
-            return jsonify({'error': 'Invalid URL format'}), 400
-    except Exception:
-        return jsonify({'error': 'Invalid URL'}), 400
 
     # Get settings
     preset = data.get('preset', 'default')
@@ -343,37 +362,85 @@ def convert_url():
     # Check if optimization is requested
     should_optimize = str(data.get('optimize', 'false')).lower() == 'true'
 
-    # Extract filename from URL
-    url_path = parsed.path
-    filename = os.path.basename(url_path) or 'image'
-    # Ensure it has an extension
-    if '.' not in filename:
-        filename += '.jpg'
-
-    # Clean filename
-    filename = re.sub(r'[^\w\-_\.]', '_', filename)
-
     unique_id = str(uuid.uuid4())[:8]
-    input_path = app.config['UPLOAD_FOLDER'] / f"{unique_id}_{filename}"
-    output_filename = f"{unique_id}_{Path(filename).stem}.svg"
-    output_path = app.config['OUTPUT_FOLDER'] / output_filename
+
+    # Check if it's a data URI
+    if url.startswith('data:'):
+        # Parse data URI: data:[<mediatype>][;base64],<data>
+        try:
+            header, encoded_data = url.split(',', 1)
+            # Extract mime type
+            mime_match = re.match(r'data:([^;]+)', header)
+            mime_type = mime_match.group(1) if mime_match else 'image/png'
+
+            if not mime_type.startswith('image/'):
+                return jsonify({'error': f'Data URI is not an image (got {mime_type})'}), 400
+
+            # Determine extension from mime type
+            ext_map = {'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif',
+                       'image/bmp': '.bmp', 'image/webp': '.webp'}
+            ext = ext_map.get(mime_type, '.png')
+            filename = f"image{ext}"
+
+            # Decode base64
+            if ';base64' in header:
+                image_data = base64.b64decode(encoded_data)
+            else:
+                image_data = encoded_data.encode('utf-8')
+
+        except Exception as e:
+            return jsonify({'error': f'Invalid data URI: {str(e)}'}), 400
+
+        input_path = app.config['UPLOAD_FOLDER'] / f"{unique_id}_{filename}"
+        output_filename = f"{unique_id}_image.svg"
+        output_path = app.config['OUTPUT_FOLDER'] / output_filename
+        original_image = url  # Keep original data URI for comparison
+
+        # Save the decoded image
+        with open(input_path, 'wb') as f:
+            f.write(image_data)
+
+    else:
+        # Regular URL - validate and download
+        try:
+            parsed = urlparse(url)
+            if not parsed.scheme or not parsed.netloc:
+                return jsonify({'error': 'Invalid URL format'}), 400
+        except Exception:
+            return jsonify({'error': 'Invalid URL'}), 400
+
+        # Extract filename from URL
+        url_path = parsed.path
+        filename = os.path.basename(url_path) or 'image'
+        if '.' not in filename:
+            filename += '.jpg'
+        filename = re.sub(r'[^\w\-_\.]', '_', filename)
+
+        input_path = app.config['UPLOAD_FOLDER'] / f"{unique_id}_{filename}"
+        output_filename = f"{unique_id}_{Path(filename).stem}.svg"
+        output_path = app.config['OUTPUT_FOLDER'] / output_filename
+        original_image = url
+
+        try:
+            # Download the image
+            response = requests.get(url, timeout=30, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            response.raise_for_status()
+
+            content_type = response.headers.get('content-type', '')
+            if not content_type.startswith('image/'):
+                return jsonify({'error': f'URL does not point to an image (got {content_type})'}), 400
+
+            with open(input_path, 'wb') as f:
+                f.write(response.content)
+
+        except requests.exceptions.Timeout:
+            return jsonify({'error': 'Request timed out'}), 504
+        except requests.exceptions.RequestException as e:
+            return jsonify({'error': f'Failed to download image: {str(e)}'}), 400
 
     try:
-        # Download the image
-        response = requests.get(url, timeout=30, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        response.raise_for_status()
-
-        # Check content type
-        content_type = response.headers.get('content-type', '')
-        if not content_type.startswith('image/'):
-            return jsonify({'error': f'URL does not point to an image (got {content_type})'}), 400
-
-        # Save the image
-        with open(input_path, 'wb') as f:
-            f.write(response.content)
-
         # Convert to SVG
         convert_image(input_path, output_path, settings)
 
@@ -381,11 +448,16 @@ def convert_url():
         with open(output_path, 'r', encoding='utf-8') as f:
             svg_content = f.read()
 
+        # Add viewBox for proper scaling
+        svg_content = add_viewbox(svg_content)
+
         # Optimize SVG if requested
         if should_optimize:
             svg_content = optimize_svg(svg_content)
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(svg_content)
+
+        # Save updated SVG
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(svg_content)
 
         input_size = os.path.getsize(input_path)
         output_size = os.path.getsize(output_path)
@@ -398,15 +470,11 @@ def convert_url():
             'original_name': filename,
             'svg_filename': output_filename,
             'svg_content': svg_content,
-            'original_image': url,
+            'original_image': original_image,
             'input_size': input_size,
             'output_size': output_size,
         })
 
-    except requests.exceptions.Timeout:
-        return jsonify({'error': 'Request timed out'}), 504
-    except requests.exceptions.RequestException as e:
-        return jsonify({'error': f'Failed to download image: {str(e)}'}), 400
     except Exception as e:
         if input_path.exists():
             os.remove(input_path)
@@ -956,7 +1024,6 @@ HTML_TEMPLATE = r'''
             background: #fff;
         }
 
-        .comparison-original,
         .comparison-svg {
             position: absolute;
             top: 0;
@@ -968,6 +1035,23 @@ HTML_TEMPLATE = r'''
             justify-content: center;
             padding: 10px;
             box-sizing: border-box;
+            z-index: 1;
+            background: #fff;
+        }
+
+        .comparison-original {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+            box-sizing: border-box;
+            z-index: 2;
+            clip-path: inset(0 50% 0 0);
         }
 
         .comparison-original img,
@@ -977,8 +1061,11 @@ HTML_TEMPLATE = r'''
             object-fit: contain;
         }
 
-        .comparison-original {
-            clip-path: inset(0 50% 0 0);
+        .comparison-svg svg {
+            width: auto !important;
+            height: auto !important;
+            max-width: 100%;
+            max-height: 230px;
         }
 
         .comparison-slider {
